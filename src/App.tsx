@@ -3,6 +3,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import {
   AlertTriangle,
   CheckSquare,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -14,6 +15,7 @@ import { AdminPanelView } from './components/AdminPanelView.tsx';
 import { BrandLogo } from './components/BrandLogo.tsx';
 import { CaseListView } from './components/CaseListView.tsx';
 import { CaseModal } from './components/CaseModal.tsx';
+import { ChangePasswordModal } from './components/ChangePasswordModal.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
 import { LoginView } from './components/LoginView.tsx';
 import { SlaAlertModal } from './components/SlaAlertModal.tsx';
@@ -78,6 +80,7 @@ export default function App() {
   const [editingCase, setEditingCase] = useState<CaseItem | null>(null);
   const [alertModalOpen, setAlertModalOpen] = useState(false);
   const [alertNonce, setAlertNonce] = useState(0);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
   // Track which alert signatures (id:sla_due_at:stage) were already triggered automatically
   const seenAlertKeysRef = useRef<Set<string>>(new Set());
@@ -339,21 +342,32 @@ export default function App() {
             <div className="text-xs text-slate-500 mt-0.5 truncate">
               {currentUser.position_name} · {currentUser.team_name}
             </div>
-            {currentUser.email && (
+            {currentUser.username && (
               <div className="text-xs font-mono text-slate-400 mt-0.5 truncate">
-                {currentUser.email}
+                @{currentUser.username}
               </div>
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="w-full flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 transition-colors cursor-pointer"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>ออกจากระบบ</span>
-          </button>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => setChangePasswordOpen(true)}
+              className="w-full flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-2 text-xs font-medium text-slate-700 transition-colors cursor-pointer"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>เปลี่ยนรหัสผ่าน</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="w-full flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 transition-colors cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>ออกจากระบบ</span>
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -404,13 +418,24 @@ export default function App() {
               </nav>
             </div>
 
-            <div className="border-t border-slate-200 pt-4 space-y-3">
+            <div className="border-t border-slate-200 pt-4 space-y-2">
               <div>
                 <div className="text-sm font-semibold text-slate-900">{currentUser.display_name}</div>
                 <div className="text-xs text-slate-500">
                   {currentUser.position_name} · {currentUser.team_name}
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  setChangePasswordOpen(true);
+                }}
+                className="w-full flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>เปลี่ยนรหัสผ่าน</span>
+              </button>
               <button
                 type="button"
                 onClick={handleLogout}
@@ -564,6 +589,12 @@ export default function App() {
           setCaseModalOpen(true);
         }}
         onClose={() => setAlertModalOpen(false)}
+      />
+      {/* Change Own Password Modal */}
+      <ChangePasswordModal
+        open={changePasswordOpen}
+        username={currentUser.username}
+        onClose={() => setChangePasswordOpen(false)}
       />
     </div>
   );

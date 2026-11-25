@@ -18,5 +18,7 @@ assert.match(rulesSource, /incoming\(\)\.updated_at == request\.time/);
 assert.match(rulesSource, /match \/staff_directory\/\{staffId\}/);
 assert.match(rulesSource, /allow list: if isSignedIn\(\) && isAdmin\(\);/);
 assert.match(rulesSource, /match \/case_acks\/\{ackId\}/);
+assert.match(rulesSource, /match \/system_config\/\{docId\}/);
+assert.match(rulesSource, /existsAfter\(\/databases\/\$\(database\)\/documents\/system_config\/bootstrap\)/);
 
 console.log('Verified all Firestore security rule invariants in firestore.rules.');

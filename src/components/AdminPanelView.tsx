@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { KeyRound, Mail, Plus, Trash2, UserPlus, Users } from 'lucide-react';
+import { Eye, EyeOff, KeyRound, Lock, Plus, Trash2, User, UserPlus, Users } from 'lucide-react';
 import {
   createPositionDoc,
   createStaffMemberDoc,
@@ -11,6 +11,9 @@ import {
 } from '../lib/firestoreService.ts';
 import { getRoleLabel } from '../lib/sla.ts';
 import type { CaseItem, Position, RoleLevel, StaffEntry, Team, UserPublic } from '../types.ts';
+
+const FIREBASE_PROVIDERS_URL =
+  'https://console.firebase.google.com/u/0/project/crm-desk-1a741/authentication/providers';
 
 interface AdminPanelViewProps {
   currentUser: UserPublic;
@@ -34,7 +37,9 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
   // Create / Edit Staff User form state
   const [showUserForm, setShowUserForm] = useState(false);
   const [editingStaff, setEditingStaff] = useState<StaffEntry | null>(null);
-  const [uEmail, setUEmail] = useState('');
+  const [uUsername, setUUsername] = useState('');
+  const [uPassword, setUPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [uDisplayName, setUDisplayName] = useState('');
   const [uPositionId, setUPositionId] = useState<string>(positions[0]?.id ?? '');
   const [uTeamId, setUTeamId] = useState<string>(teams[0]?.id ?? '');
@@ -51,7 +56,9 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
 
   const openCreateUser = () => {
     setEditingStaff(null);
-    setUEmail('');
+    setUUsername('');
+    setUPassword('');
+    setShowPassword(false);
     setUDisplayName('');
     setUPositionId(positions.find((p) => p.role_level === 'agent')?.id ?? positions[0]?.id ?? '');
     setUTeamId(teams[0]?.id ?? '');
@@ -63,7 +70,9 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
 
   const openEditUser = (s: StaffEntry) => {
     setEditingStaff(s);
-    setUEmail(s.email);
+    setUUsername(s.username || s.email.split('@')[0]);
+    setUPassword('');
+    setShowPassword(false);
     setUDisplayName(s.display_name);
     setUPositionId(s.position_id);
     setUTeamId(s.team_id);
@@ -98,15 +107,18 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
           },
           staffList
         );
-        setSuccessMsg(`อัปเดตบัญชี "${editingStaff.email}" เรียบร้อยแล้ว`);
+        setSuccessMsg(`อัปเดตบัญชี "@${editingStaff.username || editingStaff.email.split('@')[0]}" เรียบร้อยแล้ว`);
       } else {
-        await createStaffMemberDoc({
-          email: uEmail,
+        await createStaffMemberDoc(currentUser, {
+          username: uUsername,
+          password: uPassword,
           display_name: uDisplayName,
           position: selectedPos,
           team: selectedTeam,
         });
-        setSuccessMsg(`เพิ่มบัญชี "${uEmail.trim().toLowerCase()}" เรียบร้อยแล้ว (บันทึกลงฐานข้อมูลคลาวด์ถาวร)`);
+        setSuccessMsg(
+          `สร้างบัญชี "@${uUsername.trim().toLowerCase()}" เรียบร้อยแล้ว พนักงานสามารถใช้ Username และ Password นี้เข้าสู่ระบบได้ทันที`
+        );
       }
       setShowUserForm(false);
     } catch (err) {
@@ -121,7 +133,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     setSuccessMsg(null);
     try {
       await deleteStaffMemberDoc(currentUser, s);
-      setSuccessMsg(`ลบบัญชี "${s.email}" เรียบร้อยแล้ว`);
+      setSuccessMsg(`ลบบัญชี "@${s.username || s.email.split('@')[0]}" เรียบร้อยแล้ว`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'ไม่สามารถลบบัญชีผู้ใช้ได้');
     }
@@ -189,7 +201,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
         <div>
           <h1 className="text-xl font-semibold text-slate-900">จัดการบัญชีผู้ใช้ ตำแหน่ง และแผนก</h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            เพิ่มอีเมลพนักงาน กำหนดสิทธิ์ Admin, TL, Agent และจัดการทีมปฏิบัติงาน (เก็บข้อมูลถาวรบน Firestore)
+            สร้างบัญชีพนักงานด้วย Username &amp; Password กำหนดสิทธิ์ Admin, TL, Agent และจัดการทีมปฏิบัติงาน
           </p>
         </div>
 
@@ -251,8 +263,18 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       </div>
 
       {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 space-y-1.5">
+          <div>{error}</div>
+          {error.includes('operation-not-allowed') && (
+            <a
+              href={FIREBASE_PROVIDERS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block text-xs font-semibold text-blue-700 underline hover:text-blue-800"
+            >
+              คลิกเพื่อไปเปิด Email/Password ใน Firebase Console →
+            </a>
+          )}
         </div>
       )}
       {successMsg && (
@@ -271,7 +293,9 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             >
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <h2 className="text-sm font-semibold text-slate-900">
-                  {editingStaff ? `แก้ไขบัญชีผู้ใช้: ${editingStaff.email}` : 'เพิ่มบัญชีผู้ใช้งาน (Google Email)'}
+                  {editingStaff
+                    ? `แก้ไขบัญชีผู้ใช้: @${editingStaff.username || editingStaff.email.split('@')[0]}`
+                    : 'เพิ่มบัญชีผู้ใช้งานใหม่ (Username & Password)'}
                 </h2>
                 <button
                   type="button"
@@ -283,23 +307,51 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="sm:col-span-2">
+                <div className={editingStaff ? 'sm:col-span-2' : 'sm:col-span-1'}>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Google Email <span className="text-red-600">*</span>
+                    Username <span className="text-red-600">*</span>
                   </label>
                   <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
-                      type="email"
+                      type="text"
                       required
                       disabled={Boolean(editingStaff)}
-                      value={uEmail}
-                      onChange={(e) => setUEmail(e.target.value)}
-                      placeholder="เช่น somchai@gmail.com"
+                      value={uUsername}
+                      onChange={(e) => setUUsername(e.target.value)}
+                      placeholder="เช่น somchai (a-z, 0-9, ., _, -)"
                       className="w-full rounded-lg border border-slate-300 bg-white disabled:bg-slate-100 pl-9 pr-3 py-2 text-sm text-slate-900 focus:border-blue-600 focus:outline-none"
                     />
                   </div>
                 </div>
+
+                {!editingStaff && (
+                  <div className="sm:col-span-1">
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      รหัสผ่าน (อย่างน้อย 6 ตัวอักษร) <span className="text-red-600">*</span>
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        required
+                        minLength={6}
+                        value={uPassword}
+                        onChange={(e) => setUPassword(e.target.value)}
+                        placeholder="••••••"
+                        className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-9 py-2 text-sm text-slate-900 focus:border-blue-600 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((prev) => !prev)}
+                        aria-label={showPassword ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="sm:col-span-2">
                   <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -388,7 +440,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
-                    <th className="py-3 px-5">อีเมล Google</th>
+                    <th className="py-3 px-5">Username</th>
                     <th className="py-3 px-4">ชื่อผู้รับเรื่อง</th>
                     <th className="py-3 px-4">ตำแหน่ง (สิทธิ์)</th>
                     <th className="py-3 px-4">ทีม / แผนก</th>
@@ -397,10 +449,12 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-sm">
-                  {staffList.map((s) => (
+                  {staffList.map((s) => {
+                    const displayAccount = `@${s.username || s.email.split('@')[0]}`;
+                    return (
                     <tr key={s.id} className="hover:bg-slate-50">
                       <td className="py-3.5 px-5 font-mono text-xs font-medium text-slate-900">
-                        {s.email}
+                        {displayAccount}
                         {s.linked_uid === currentUser.uid && (
                           <span className="ml-1.5 font-sans text-blue-700">(คุณ)</span>
                         )}
@@ -442,7 +496,8 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

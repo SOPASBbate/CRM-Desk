@@ -14,8 +14,21 @@ import {
   writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { signInWithPopup, signOut, type User } from 'firebase/auth';
-import { auth, db, googleAuthProvider, handleFirestoreError, OperationType } from './firebase.ts';
+import { getApps, initializeApp } from 'firebase/app';
+import {
+  createUserWithEmailAndPassword,
+  EmailAuthProvider,
+  getAuth,
+  inMemoryPersistence,
+  reauthenticateWithCredential,
+  setPersistence,
+  signInWithEmailAndPassword,
+  signOut,
+  updatePassword,
+  type User,
+} from 'firebase/auth';
+import firebaseConfig from '../../firebase-applet-config.json';
+import { auth, db, handleFirestoreError, OperationType } from './firebase.ts';
 import { computeAlertStage, computeLiveSlaState, needsUserAck } from './sla.ts';
 import type {
   AckHistoryEntry,
@@ -32,8 +45,6 @@ import type {
   UserCaseAck,
   UserPublic,
 } from '../types.ts';
-
-export const BOOTSTRAPPED_ADMIN_EMAIL = 'tanawin.wat@gmail.com';
 
 const DEFAULT_TEAMS: { id: string; name: string; description: string }[] = [
   { id: 'line_oa', name: 'Line OA', description: 'ทีมดูแลลูกค้าและร้านค้าผ่านช่องทาง Line Official Account' },
@@ -66,13 +77,124 @@ export async function sha256Hex(input: string): Promise<string> {
     .join('');
 }
 
-export async function signInWithGooglePopup(): Promise<User> {
-  const result = await signInWithPopup(auth, googleAuthProvider);
-  return result.user;
+const SYNTHETIC_EMAIL_DOMAIN = 'crmdesk.local';
+
+let activeBootstrapPromise: Promise<void> | null = null;
+
+export function resolveLoginIdentifier(usernameInput: string): { username: string; authEmail: string } {
+  const raw = usernameInput.trim().toLowerCase();
+  if (!raw) {
+    throw new Error('กรุณากรอกชื่อผู้ใช้ (Username)');
+  }
+  if (raw.includes('@')) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw) || raw.length > 254) {
+      throw new Error('รูปแบบชื่อผู้ใช้ไม่ถูกต้อง');
+    }
+    return { username: raw.split('@')[0].slice(0, 80), authEmail: raw };
+  }
+  if (!/^[a-z0-9._-]{3,32}$/.test(raw)) {
+    throw new Error('Username ต้องมีความยาว 3-32 ตัวอักษร (ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษ a-z, ตัวเลข 0-9, ., _, -)');
+  }
+  return { username: raw, authEmail: `${raw}@${SYNTHETIC_EMAIL_DOMAIN}` };
+}
+
+export function mapAuthErrorMessage(err: unknown, context: 'login' | 'create', username?: string): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes('auth/operation-not-allowed')) {
+    return new Error(
+      'auth/operation-not-allowed: ยังไม่ได้เปิดใช้งาน Email/Password ใน Firebase Console (Authentication → Sign-in method → Email/Password → เปิด Enable แล้วกด Save)'
+    );
+  }
+  if (msg.includes('auth/email-already-in-use')) {
+    return new Error(
+      `ชื่อผู้ใช้ "${username ?? ''}" ถูกใช้งานแล้วในระบบ กรุณาเลือก Username อื่น หรือเข้าสู่ระบบด้วยบัญชีที่มีอยู่`
+    );
+  }
+  if (msg.includes('auth/weak-password')) {
+    return new Error('รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร');
+  }
+  if (msg.includes('auth/invalid-email')) {
+    return new Error('รูปแบบ Username ไม่ถูกต้อง (ใช้ได้เฉพาะ a-z, 0-9, ., _, - ความยาว 3-32 ตัวอักษร)');
+  }
+  if (
+    msg.includes('auth/invalid-credential') ||
+    msg.includes('auth/wrong-password') ||
+    msg.includes('auth/user-not-found')
+  ) {
+    return new Error('ชื่อผู้ใช้ (Username) หรือรหัสผ่านไม่ถูกต้อง');
+  }
+  if (msg.includes('auth/too-many-requests')) {
+    return new Error('ลองทำรายการผิดพลาดหลายครั้ง กรุณารอสักครู่แล้วลองใหม่อีกครั้ง');
+  }
+  if (msg.includes('auth/network-request-failed')) {
+    return new Error('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ยืนยันตัวตนได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่');
+  }
+  if (context === 'login' && err instanceof Error) {
+    return err;
+  }
+  return err instanceof Error ? err : new Error(msg);
+}
+
+export async function isBootstrapNeeded(): Promise<boolean> {
+  try {
+    const snap = await getDoc(doc(db, 'system_config', 'bootstrap'));
+    return !snap.exists();
+  } catch {
+    return false;
+  }
+}
+
+export async function signInWithUsernamePassword(usernameInput: string, password: string): Promise<User> {
+  const { authEmail, username } = resolveLoginIdentifier(usernameInput);
+  if (!password) {
+    throw new Error('กรุณากรอกรหัสผ่าน');
+  }
+  try {
+    const result = await signInWithEmailAndPassword(auth, authEmail, password);
+    return result.user;
+  } catch (err) {
+    throw mapAuthErrorMessage(err, 'login', username);
+  }
 }
 
 export async function signOutFirebase(): Promise<void> {
   await signOut(auth);
+}
+
+export async function changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !user.email) {
+    throw new Error('ไม่พบข้อมูลผู้ใช้งานที่กำลังเข้าสู่ระบบ');
+  }
+  if (!currentPassword) {
+    throw new Error('กรุณากรอกรหัสผ่านปัจจุบัน');
+  }
+  if (newPassword.length < 6) {
+    throw new Error('รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร');
+  }
+  if (currentPassword === newPassword) {
+    throw new Error('รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านปัจจุบัน');
+  }
+  try {
+    const credential = EmailAuthProvider.credential(user.email, currentPassword);
+    await reauthenticateWithCredential(user, credential);
+    await updatePassword(user, newPassword);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      msg.includes('auth/wrong-password') ||
+      msg.includes('auth/invalid-credential')
+    ) {
+      throw new Error('รหัสผ่านปัจจุบันไม่ถูกต้อง');
+    }
+    if (msg.includes('auth/weak-password')) {
+      throw new Error('รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร');
+    }
+    if (msg.includes('auth/too-many-requests')) {
+      throw new Error('ลองทำรายการผิดพลาดหลายครั้ง กรุณารอสักครู่แล้วลองใหม่');
+    }
+    throw err instanceof Error ? err : new Error(msg);
+  }
 }
 
 async function seedDefaultOrgMetadata(): Promise<void> {
@@ -123,172 +245,209 @@ async function seedDefaultOrgMetadata(): Promise<void> {
   }
 }
 
+export async function bootstrapFirstAdmin(input: {
+  username: string;
+  password: string;
+  display_name: string;
+}): Promise<void> {
+  if (input.username.includes('@')) {
+    throw new Error('กรุณาระบุเฉพาะ Username (ไม่ต้องใส่ @ หรืออีเมล) เช่น admin');
+  }
+  const { username, authEmail } = resolveLoginIdentifier(input.username);
+  const password = input.password ?? '';
+  if (password.length < 6) {
+    throw new Error('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
+  }
+  const displayName = input.display_name.trim().slice(0, 120);
+  if (!displayName) {
+    throw new Error('กรุณาระบุชื่อ-นามสกุลผู้ดูแลระบบ');
+  }
+
+  const bootstrapRef = doc(db, 'system_config', 'bootstrap');
+  const existingBootstrap = await getDoc(bootstrapRef).catch(() => null);
+  if (existingBootstrap?.exists()) {
+    throw new Error('ระบบได้ตั้งค่าบัญชี Admin เริ่มต้นไปแล้ว กรุณาเข้าสู่ระบบด้วย Username และ Password');
+  }
+
+  let resolveGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resolveGate = resolve;
+  });
+  activeBootstrapPromise = gate;
+
+  let createdUser: User | null = null;
+  let bootstrapLocked = false;
+  try {
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, authEmail, password);
+      createdUser = cred.user;
+    } catch (err) {
+      throw mapAuthErrorMessage(err, 'create', username);
+    }
+
+    const uid = createdUser.uid;
+    const staffId = await sha256Hex(authEmail);
+
+    // Step 1: Atomically lock bootstrap and grant first admin role
+    const lockBatch = writeBatch(db);
+    lockBatch.set(bootstrapRef, {
+      id: 'bootstrap',
+      initialized: true,
+      initialized_at: serverTimestamp(),
+    });
+    lockBatch.set(doc(db, 'admins', uid), {
+      uid,
+      granted_by: uid,
+      granted_at: serverTimestamp(),
+    });
+    await lockBatch.commit();
+    bootstrapLocked = true;
+
+    // Step 2: Ensure default teams & positions exist
+    await seedDefaultOrgMetadata();
+
+    // Step 3: Create staff_directory & users operational profile
+    const profileBatch = writeBatch(db);
+    profileBatch.set(doc(db, 'staff_directory', staffId), {
+      id: staffId,
+      email: authEmail,
+      username,
+      display_name: displayName,
+      position_id: 'pos_admin',
+      position_name: 'Admin',
+      role: 'admin',
+      team_id: 'line_oa',
+      team_name: 'Line OA',
+      is_active: true,
+      linked_uid: uid,
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    });
+    profileBatch.set(doc(db, 'users', uid), {
+      uid,
+      staff_id: staffId,
+      username,
+      display_name: displayName,
+      position_id: 'pos_admin',
+      position_name: 'Admin',
+      role: 'admin',
+      team_id: 'line_oa',
+      team_name: 'Line OA',
+      is_active: true,
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    });
+    await profileBatch.commit();
+  } catch (err) {
+    if (createdUser && !bootstrapLocked) {
+      await createdUser.delete().catch(() => {});
+      await signOut(auth).catch(() => {});
+    }
+    throw err;
+  } finally {
+    resolveGate();
+    activeBootstrapPromise = null;
+  }
+}
+
 export async function resolveAuthenticatedUser(firebaseUser: User): Promise<UserPublic> {
-  const emailLower = (firebaseUser.email ?? '').trim().toLowerCase();
-  if (!emailLower || !firebaseUser.emailVerified) {
-    throw new Error('บัญชี Google ของคุณต้องยืนยันอีเมลเรียบร้อยแล้วจึงจะเข้าใช้งานได้');
+  if (activeBootstrapPromise) {
+    await activeBootstrapPromise.catch(() => {});
   }
 
   const uid = firebaseUser.uid;
-  const staffId = await sha256Hex(emailLower);
-  const isBootstrapAdmin = emailLower === BOOTSTRAPPED_ADMIN_EMAIL;
+  const emailLower = (firebaseUser.email ?? '').trim().toLowerCase();
 
-  if (isBootstrapAdmin) {
-    await seedDefaultOrgMetadata();
-
-    const adminRef = doc(db, 'admins', uid);
-    const adminSnap = await getDoc(adminRef).catch((err) =>
-      handleFirestoreError(err, OperationType.GET, `admins/${uid}`)
-    );
-    if (!adminSnap.exists()) {
-      await setDoc(adminRef, {
-        uid,
-        granted_by: uid,
-        granted_at: serverTimestamp(),
-      }).catch((err) => handleFirestoreError(err, OperationType.CREATE, `admins/${uid}`));
-    }
-  }
-
-  const staffRef = doc(db, 'staff_directory', staffId);
-  let staffSnap;
-  try {
-    staffSnap = await getDoc(staffRef);
-  } catch (err) {
-    const code = (err as { code?: string })?.code ?? '';
-    if (!isBootstrapAdmin && (code === 'permission-denied' || String(err).includes('insufficient permissions'))) {
-      throw new Error(
-        `อีเมล ${emailLower} ยังไม่ได้รับสิทธิ์เข้าใช้งาน กรุณาติดต่อ Admin เพื่อเพิ่มอีเมลนี้เข้าสู่ระบบ`
-      );
-    }
-    handleFirestoreError(err, OperationType.GET, `staff_directory/${staffId}`);
-  }
-
-  if (!staffSnap.exists()) {
-    if (isBootstrapAdmin) {
-      const displayName = (firebaseUser.displayName ?? 'Admin').trim().slice(0, 120) || 'Admin';
-      await setDoc(staffRef, {
-        id: staffId,
-        email: emailLower,
-        display_name: displayName,
-        position_id: 'pos_admin',
-        position_name: 'Admin',
-        role: 'admin',
-        team_id: 'line_oa',
-        team_name: 'Line OA',
-        is_active: true,
-        linked_uid: uid,
-        created_at: serverTimestamp(),
-        updated_at: serverTimestamp(),
-      }).catch((err) => handleFirestoreError(err, OperationType.CREATE, `staff_directory/${staffId}`));
-      staffSnap = await getDoc(staffRef).catch((err) =>
-        handleFirestoreError(err, OperationType.GET, `staff_directory/${staffId}`)
-      );
-    } else {
-      throw new Error(
-        `อีเมล ${emailLower} ยังไม่ได้รับสิทธิ์เข้าใช้งาน กรุณาติดต่อ Admin เพื่อเพิ่มอีเมลนี้เข้าสู่ระบบ`
-      );
-    }
-  }
-
-  const staffData = staffSnap.data() as Record<string, unknown>;
-  if (staffData.is_active !== true) {
-    throw new Error('บัญชีนี้ถูกปิดการใช้งาน กรุณาติดต่อ Admin');
-  }
-
-  if (staffData.linked_uid !== uid) {
-    await updateDoc(staffRef, {
-      linked_uid: uid,
-      updated_at: serverTimestamp(),
-    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `staff_directory/${staffId}`));
-  }
-
-  const userRef = doc(db, 'users', uid);
-  const userSnap = await getDoc(userRef).catch((err) =>
+  const existingUserRef = doc(db, 'users', uid);
+  const existingUserSnap = await getDoc(existingUserRef).catch((err) =>
     handleFirestoreError(err, OperationType.GET, `users/${uid}`)
   );
 
-  const profilePayload = {
-    uid,
-    staff_id: staffId,
-    display_name: String(staffData.display_name ?? firebaseUser.displayName ?? 'User').slice(0, 120),
-    position_id: String(staffData.position_id ?? 'pos_agent'),
-    position_name: String(staffData.position_name ?? 'Agent'),
-    role: (staffData.role as RoleLevel) ?? 'agent',
-    team_id: String(staffData.team_id ?? 'line_oa'),
-    team_name: String(staffData.team_name ?? 'Line OA'),
-    is_active: Boolean(staffData.is_active),
-  };
+  if (existingUserSnap.exists()) {
+    const uData = existingUserSnap.data() as Record<string, unknown>;
+    if (uData.is_active !== true) {
+      throw new Error('บัญชีนี้ถูกปิดการใช้งาน กรุณาติดต่อ Admin');
+    }
+    const rawUsername = uData.username
+      ? String(uData.username)
+      : emailLower
+        ? emailLower.split('@')[0]
+        : '';
+    return {
+      id: uid,
+      uid,
+      staff_id: String(uData.staff_id ?? ''),
+      username: rawUsername || undefined,
+      display_name: String(uData.display_name ?? ''),
+      role: (uData.role as RoleLevel) ?? 'agent',
+      position_id: String(uData.position_id ?? ''),
+      position_name: String(uData.position_name ?? ''),
+      team_id: String(uData.team_id ?? ''),
+      team_name: String(uData.team_name ?? ''),
+      is_active: Boolean(uData.is_active),
+      created_at: timestampToIso(uData.created_at),
+    };
+  }
 
-  if (!userSnap.exists()) {
-    await setDoc(userRef, {
-      ...profilePayload,
+  // Self-heal if admin grant exists (e.g., interrupted bootstrap)
+  const adminSnap = await getDoc(doc(db, 'admins', uid)).catch(() => null);
+  if (adminSnap?.exists() && emailLower) {
+    await seedDefaultOrgMetadata();
+    const staffId = await sha256Hex(emailLower);
+    const username = emailLower.split('@')[0].slice(0, 80);
+    const displayName = (firebaseUser.displayName ?? username).trim().slice(0, 120) || 'Admin';
+
+    const repairBatch = writeBatch(db);
+    repairBatch.set(doc(db, 'staff_directory', staffId), {
+      id: staffId,
+      email: emailLower,
+      username,
+      display_name: displayName,
+      position_id: 'pos_admin',
+      position_name: 'Admin',
+      role: 'admin',
+      team_id: 'line_oa',
+      team_name: 'Line OA',
+      is_active: true,
+      linked_uid: uid,
       created_at: serverTimestamp(),
       updated_at: serverTimestamp(),
-    }).catch((err) => handleFirestoreError(err, OperationType.CREATE, `users/${uid}`));
-  } else {
-    const existing = userSnap.data();
-    const changed =
-      existing.display_name !== profilePayload.display_name ||
-      existing.position_id !== profilePayload.position_id ||
-      existing.position_name !== profilePayload.position_name ||
-      existing.role !== profilePayload.role ||
-      existing.team_id !== profilePayload.team_id ||
-      existing.team_name !== profilePayload.team_name ||
-      existing.is_active !== profilePayload.is_active;
-
-    if (changed) {
-      await updateDoc(userRef, {
-        display_name: profilePayload.display_name,
-        position_id: profilePayload.position_id,
-        position_name: profilePayload.position_name,
-        role: profilePayload.role,
-        team_id: profilePayload.team_id,
-        team_name: profilePayload.team_name,
-        is_active: profilePayload.is_active,
-        updated_at: serverTimestamp(),
-      }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${uid}`));
-    }
-  }
-
-  await setDoc(doc(db, 'users', uid, 'private', 'info'), {
-    uid,
-    email: emailLower,
-    updated_at: serverTimestamp(),
-  }).catch((err) => handleFirestoreError(err, OperationType.WRITE, `users/${uid}/private/info`));
-
-  if (staffData.role === 'admin') {
-    const adminRef = doc(db, 'admins', uid);
-    const adminSnap = await getDoc(adminRef).catch((err) =>
-      handleFirestoreError(err, OperationType.GET, `admins/${uid}`)
+    });
+    repairBatch.set(existingUserRef, {
+      uid,
+      staff_id: staffId,
+      username,
+      display_name: displayName,
+      position_id: 'pos_admin',
+      position_name: 'Admin',
+      role: 'admin',
+      team_id: 'line_oa',
+      team_name: 'Line OA',
+      is_active: true,
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    });
+    await repairBatch.commit().catch((err) =>
+      handleFirestoreError(err, OperationType.CREATE, `users/${uid}`)
     );
-    if (!adminSnap.exists()) {
-      await setDoc(adminRef, {
-        uid,
-        granted_by: uid,
-        granted_at: serverTimestamp(),
-      }).catch((err) => handleFirestoreError(err, OperationType.CREATE, `admins/${uid}`));
-    }
+
+    return {
+      id: uid,
+      uid,
+      staff_id: staffId,
+      username,
+      display_name: displayName,
+      role: 'admin',
+      position_id: 'pos_admin',
+      position_name: 'Admin',
+      team_id: 'line_oa',
+      team_name: 'Line OA',
+      is_active: true,
+      created_at: new Date().toISOString(),
+    };
   }
 
-  const finalSnap = await getDoc(userRef).catch((err) =>
-    handleFirestoreError(err, OperationType.GET, `users/${uid}`)
-  );
-  const finalData: Record<string, unknown> = finalSnap.data() ?? profilePayload;
-
-  return {
-    id: uid,
-    uid,
-    staff_id: String(finalData.staff_id ?? staffId),
-    display_name: String(finalData.display_name),
-    role: finalData.role as RoleLevel,
-    position_id: String(finalData.position_id),
-    position_name: String(finalData.position_name),
-    team_id: String(finalData.team_id),
-    team_name: String(finalData.team_name),
-    is_active: Boolean(finalData.is_active),
-    email: emailLower,
-    created_at: timestampToIso(finalData.created_at),
-  };
+  throw new Error('ไม่พบบัญชีผู้ใช้งานนี้ในระบบ กรุณาติดต่อ Admin เพื่อสร้างบัญชีและรหัสผ่านให้คุณ');
 }
 
 // ==================== REAL-TIME LISTENERS ====================
@@ -376,6 +535,7 @@ export function subscribeActiveUsers(
           id: d.id,
           uid: String(data.uid ?? d.id),
           staff_id: String(data.staff_id ?? ''),
+          username: data.username ? String(data.username) : undefined,
           display_name: String(data.display_name ?? ''),
           role: (data.role as RoleLevel) ?? 'agent',
           position_id: String(data.position_id ?? ''),
@@ -413,6 +573,7 @@ export function subscribeStaffDirectory(
         return {
           id: d.id,
           email: String(data.email ?? ''),
+          username: data.username ? String(data.username) : undefined,
           display_name: String(data.display_name ?? ''),
           position_id: String(data.position_id ?? ''),
           position_name: String(data.position_name ?? ''),
@@ -918,44 +1079,99 @@ export async function fetchCaseAckHistory(caseId: string): Promise<AckHistoryEnt
 
 // ==================== ADMIN MUTATIONS ====================
 
-export async function createStaffMemberDoc(input: {
-  email: string;
-  display_name: string;
-  position: Position;
-  team: Team;
-}): Promise<void> {
-  const emailLower = input.email.trim().toLowerCase();
-  const displayName = input.display_name.trim().slice(0, 120);
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailLower) || emailLower.length > 254) {
-    throw new Error('กรุณากรอกอีเมล Google ให้ถูกต้อง');
+export async function createStaffMemberDoc(
+  currentUser: UserPublic,
+  input: {
+    username: string;
+    password: string;
+    display_name: string;
+    position: Position;
+    team: Team;
   }
+): Promise<void> {
+  const displayName = input.display_name.trim().slice(0, 120);
   if (!displayName) {
     throw new Error('กรุณาระบุชื่อ-นามสกุลผู้ใช้งาน');
   }
+  if (input.username.includes('@')) {
+    throw new Error('กรุณาระบุเฉพาะ Username (ไม่ต้องใส่ @ หรืออีเมล) เช่น somchai');
+  }
 
-  const staffId = await sha256Hex(emailLower);
+  const { username, authEmail } = resolveLoginIdentifier(input.username);
+  const password = input.password ?? '';
+  if (password.length < 6) {
+    throw new Error('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
+  }
+
+  const staffId = await sha256Hex(authEmail);
   const staffRef = doc(db, 'staff_directory', staffId);
   const existing = await getDoc(staffRef).catch((err) =>
     handleFirestoreError(err, OperationType.GET, `staff_directory/${staffId}`)
   );
   if (existing.exists()) {
-    throw new Error(`อีเมล "${emailLower}" มีอยู่ในระบบแล้ว`);
+    throw new Error(`ชื่อผู้ใช้ "${username}" มีอยู่ในระบบแล้ว`);
   }
 
-  await setDoc(staffRef, {
-    id: staffId,
-    email: emailLower,
-    display_name: displayName,
-    position_id: input.position.id,
-    position_name: input.position.name.slice(0, 80),
-    role: input.position.role_level,
-    team_id: input.team.id,
-    team_name: input.team.name.slice(0, 80),
-    is_active: true,
-    linked_uid: '',
-    created_at: serverTimestamp(),
-    updated_at: serverTimestamp(),
-  }).catch((err) => handleFirestoreError(err, OperationType.CREATE, `staff_directory/${staffId}`));
+  const secondaryApp =
+    getApps().find((a) => a.name === 'AdminUserCreator') ??
+    initializeApp(firebaseConfig, 'AdminUserCreator');
+  const secondaryAuth = getAuth(secondaryApp);
+  await setPersistence(secondaryAuth, inMemoryPersistence);
+
+  let createdAuthUser: User | null = null;
+  try {
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, authEmail, password);
+    createdAuthUser = cred.user;
+  } catch (err) {
+    throw mapAuthErrorMessage(err, 'create', username);
+  }
+
+  const newUid = createdAuthUser.uid;
+  try {
+    const batch = writeBatch(db);
+    batch.set(staffRef, {
+      id: staffId,
+      email: authEmail,
+      username,
+      display_name: displayName,
+      position_id: input.position.id,
+      position_name: input.position.name.slice(0, 80),
+      role: input.position.role_level,
+      team_id: input.team.id,
+      team_name: input.team.name.slice(0, 80),
+      is_active: true,
+      linked_uid: newUid,
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    });
+    batch.set(doc(db, 'users', newUid), {
+      uid: newUid,
+      staff_id: staffId,
+      username,
+      display_name: displayName,
+      position_id: input.position.id,
+      position_name: input.position.name.slice(0, 80),
+      role: input.position.role_level,
+      team_id: input.team.id,
+      team_name: input.team.name.slice(0, 80),
+      is_active: true,
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    });
+    if (input.position.role_level === 'admin') {
+      batch.set(doc(db, 'admins', newUid), {
+        uid: newUid,
+        granted_by: currentUser.uid,
+        granted_at: serverTimestamp(),
+      });
+    }
+    await batch.commit();
+  } catch (err) {
+    await createdAuthUser.delete().catch(() => {});
+    handleFirestoreError(err, OperationType.CREATE, `staff_directory/${staffId}`);
+  } finally {
+    await signOut(secondaryAuth).catch(() => {});
+  }
 }
 
 export async function updateStaffMemberDoc(

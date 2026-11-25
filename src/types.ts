@@ -34,6 +34,7 @@ export interface UserPublic {
   id: string;
   uid: string;
   staff_id: string;
+  username?: string;
   display_name: string;
   role: RoleLevel;
   position_id: string;
@@ -48,6 +49,7 @@ export interface UserPublic {
 export interface StaffEntry {
   id: string;
   email: string;
+  username?: string;
   display_name: string;
   position_id: string;
   position_name: string;

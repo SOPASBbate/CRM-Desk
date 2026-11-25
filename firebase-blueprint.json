@@ -1,5 +1,26 @@
 {
   "entities": {
+    "SystemBootstrap": {
+      "title": "SystemBootstrap",
+      "description": "One-time initialization lock marker for creating the first administrator account.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "initialized": {
+          "type": "boolean"
+        },
+        "initialized_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "initialized", "initialized_at"]
+    },
     "AdminRole": {
       "title": "AdminRole",
       "description": "Trusted administrator marker document keyed by Firebase Auth UID.",
@@ -115,6 +136,10 @@
           "minLength": 3,
           "maxLength": 254
         },
+        "username": {
+          "type": "string",
+          "maxLength": 80
+        },
         "display_name": {
           "type": "string",
           "minLength": 1,
@@ -193,6 +218,10 @@
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "maxLength": 80
         },
         "display_name": {
           "type": "string",
@@ -477,6 +506,10 @@
     }
   },
   "firestore": {
+    "/system_config/{docId}": {
+      "schema": { "$ref": "#/entities/SystemBootstrap" },
+      "description": "One-time system bootstrap lock document."
+    },
     "/admins/{userId}": {
       "schema": { "$ref": "#/entities/AdminRole" },
       "description": "Admin role grant documents."

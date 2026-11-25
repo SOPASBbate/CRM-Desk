@@ -20,11 +20,19 @@ service cloud.firestore {
     }
 
     function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
       return request.auth != null && request.auth.token.email_verified == true;
     }
 
     function isBootstrappedAdmin() {
-      return isSignedIn() && request.auth.token.email == 'tanawin.wat@gmail.com';
+      return isEmailVerified() && request.auth.token.email == 'tanawin.wat@gmail.com';
+    }
+
+    function isSystemBootstrapped() {
+      return exists(/databases/$(database)/documents/system_config/bootstrap);
     }
 
     function isAdmin() {
@@ -65,6 +73,15 @@ service cloud.firestore {
     }
 
     // ==================== VALIDATION BLUEPRINTS ====================
+    function isValidBootstrapConfig(data, docId) {
+      return data.keys().hasAll(['id', 'initialized', 'initialized_at']) &&
+        data.keys().hasOnly(['id', 'initialized', 'initialized_at']) &&
+        isValidId(data.id) &&
+        data.id == docId &&
+        data.initialized == true &&
+        data.initialized_at is timestamp;
+    }
+
     function isValidAdminRole(data, docId) {
       return data.keys().hasAll(['uid', 'granted_by', 'granted_at']) &&
         data.keys().hasOnly(['uid', 'granted_by', 'granted_at']) &&
@@ -105,12 +122,13 @@ service cloud.firestore {
           'role', 'team_id', 'team_name', 'is_active', 'linked_uid', 'created_at', 'updated_at'
         ]) &&
         data.keys().hasOnly([
-          'id', 'email', 'display_name', 'position_id', 'position_name',
+          'id', 'email', 'username', 'display_name', 'position_id', 'position_name',
           'role', 'team_id', 'team_name', 'is_active', 'linked_uid', 'created_at', 'updated_at'
         ]) &&
         isValidId(data.id) &&
         data.id == docId &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        (!('username' in data) || (data.username is string && data.username.size() <= 80)) &&
         data.display_name is string && data.display_name.size() >= 1 && data.display_name.size() <= 120 &&
         isValidId(data.position_id) &&
         data.position_name is string && data.position_name.size() >= 1 && data.position_name.size() <= 80 &&
@@ -129,12 +147,13 @@ service cloud.firestore {
           'role', 'team_id', 'team_name', 'is_active', 'created_at', 'updated_at'
         ]) &&
         data.keys().hasOnly([
-          'uid', 'staff_id', 'display_name', 'position_id', 'position_name',
+          'uid', 'staff_id', 'username', 'display_name', 'position_id', 'position_name',
           'role', 'team_id', 'team_name', 'is_active', 'created_at', 'updated_at'
         ]) &&
         isValidId(data.uid) &&
         data.uid == docId &&
         isValidId(data.staff_id) &&
+        (!('username' in data) || (data.username is string && data.username.size() <= 80)) &&
         data.display_name is string && data.display_name.size() >= 1 && data.display_name.size() <= 120 &&
         isValidId(data.position_id) &&
         data.position_name is string && data.position_name.size() >= 1 && data.position_name.size() <= 80 &&
@@ -225,6 +244,18 @@ service cloud.firestore {
       allow get: if isValidId(docId) && docId == 'connection';
     }
 
+    // One-time system bootstrap lock (zero PII)
+    match /system_config/{docId} {
+      allow get: if isValidId(docId) && docId == 'bootstrap';
+      allow list: if false;
+      allow create: if isSignedIn() && isValidId(docId) && docId == 'bootstrap' &&
+        !isSystemBootstrapped() &&
+        isValidBootstrapConfig(incoming(), docId) &&
+        incoming().initialized_at == request.time &&
+        existsAfter(/databases/$(database)/documents/admins/$(request.auth.uid));
+      allow update, delete: if false;
+    }
+
     // Admin role grants
     match /admins/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (userId == request.auth.uid || isAdmin());
@@ -234,8 +265,15 @@ service cloud.firestore {
         incoming().granted_at == request.time &&
         (
           isAdmin() ||
+          (
+            !isSystemBootstrapped() &&
+            userId == request.auth.uid &&
+            incoming().granted_by == request.auth.uid &&
+            existsAfter(/databases/$(database)/documents/system_config/bootstrap)
+          ) ||
           (isBootstrappedAdmin() && userId == request.auth.uid && incoming().granted_by == request.auth.uid) ||
           (
+            isEmailVerified() &&
             userId == request.auth.uid &&
             incoming().granted_by == request.auth.uid &&
             userDocExists() &&
@@ -284,10 +322,10 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(positionId) && existing().is_system == false;
     }
 
-    // Staff directory (contains PII email: strictly isolated)
+    // Staff directory (contains email/username: strictly isolated)
     match /staff_directory/{staffId} {
       allow get: if isSignedIn() && isValidId(staffId) &&
-        (isAdmin() || existing().email == request.auth.token.email);
+        (isAdmin() || (isEmailVerified() && existing().email == request.auth.token.email));
       allow list: if isSignedIn() && isAdmin();
       allow create: if isSignedIn() && isValidId(staffId) &&
         isValidStaffEntry(incoming(), staffId) &&
@@ -316,6 +354,7 @@ service cloud.firestore {
             ])
           ) ||
           (
+            isEmailVerified() &&
             existing().email == request.auth.token.email &&
             existing().is_active == true &&
             incoming().linked_uid == request.auth.uid &&
@@ -343,6 +382,7 @@ service cloud.firestore {
             incoming().role == 'admin'
           ) ||
           (
+            isEmailVerified() &&
             userId == request.auth.uid &&
             exists(/databases/$(database)/documents/staff_directory/$(incoming().staff_id)) &&
             get(/databases/$(database)/documents/staff_directory/$(incoming().staff_id)).data.email == request.auth.token.email &&
@@ -369,6 +409,7 @@ service cloud.firestore {
             ])
           ) ||
           (
+            isEmailVerified() &&
             userId == request.auth.uid &&
             exists(/databases/$(database)/documents/staff_directory/$(existing().staff_id)) &&
             get(/databases/$(database)/documents/staff_directory/$(existing().staff_id)).data.email == request.auth.token.email &&
@@ -391,7 +432,7 @@ service cloud.firestore {
       match /private/{docId} {
         allow get: if isSignedIn() && isValidId(userId) && isValidId(docId) && (userId == request.auth.uid || isAdmin());
         allow list: if isSignedIn() && (userId == request.auth.uid || isAdmin());
-        allow create, update: if isSignedIn() && isValidId(userId) && isValidId(docId) &&
+        allow create, update: if isEmailVerified() && isValidId(userId) && isValidId(docId) &&
           docId == 'info' &&
           userId == request.auth.uid &&
           isValidUserPrivateInfo(incoming(), userId) &&
